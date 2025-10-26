@@ -72,19 +72,18 @@ curl -X POST https://ikogbedmigsgcgheusrd.supabase.co/functions/v1/polymarket-mo
 
 ### Monitoring Behavior
 
-The system tracks each unique trade using blockchain transaction hashes stored in the database:
+The system processes ALL trades from the Polymarket API and prevents duplicate ALERTS:
 
-✅ **Allowed**: Same trader placing multiple bets (different transactions)
-✅ **Allowed**: All legitimate trades are tracked
-❌ **Prevented**: Processing the same blockchain transaction twice (persists across function calls)
+✅ **Allowed**: Same trader placing multiple bets → Multiple alerts
+✅ **Allowed**: All legitimate trades are processed every time
+❌ **Prevented**: Duplicate alerts (same trader + same market + same bet value within 1 hour)
 
 **How it works:**
-- Each trade has a unique `transactionHash` from the blockchain
-- Transaction hashes are stored in `processed_trades` table in Supabase
-- This persists across edge function calls (unlike in-memory storage)
-- Same trader can place multiple bets and all will be tracked
-- Only prevents reprocessing the exact same blockchain transaction
-- Old processed trades (>7 days) are automatically cleaned up
+- Fetches last 100 trades from Polymarket API every 10 seconds
+- Processes ALL trades in each batch (no trade-level deduplication)
+- Before creating an alert, checks if identical alert exists (same trader, market, bet value)
+- Only prevents duplicate ALERTS, not duplicate trade processing
+- This matches polymarketv1 behavior: process everything, show unique alerts
 
 ### Monitoring Modes
 
@@ -125,19 +124,18 @@ Edit `vps-monitor.sh` line 71 to change mode:
 1. **VPS Script** calls edge function every 10 seconds
 2. **Edge Function**:
    - Fetches last 100 trades from Polymarket API
-   - Uses blockchain `transactionHash` to identify unique trades
-   - Checks `processed_trades` table to skip already-processed transactions
-   - Stores new transaction hashes in database
-   - Checks trader stats against thresholds
-   - Creates alerts in database for qualifying trades
+   - Processes ALL trades (no trade-level deduplication)
+   - For each trade, checks trader stats against thresholds
+   - Before creating alert, checks if identical alert exists in last hour
+   - Creates alert only if trader qualifies AND no duplicate alert exists
 3. **Frontend** receives real-time updates via Supabase subscriptions
 4. **Users** can filter and view alerts with custom thresholds
 
-**Key Insight:** Each blockchain transaction has a unique hash. By storing processed transaction hashes in the database (not just in memory), we ensure:
-- Every legitimate trade is captured
-- No duplicate alerts even across multiple edge function calls
-- Persistence across server restarts
-- Automatic cleanup of old data (>7 days)
+**Key Insight:** We process every trade in every API call (like polymarketv1), but prevent duplicate ALERTS at the database level. This ensures:
+- Every qualifying trade is evaluated
+- No missed opportunities due to overly aggressive deduplication
+- No duplicate alerts shown to users
+- Same trader can have multiple alerts for different bets
 
 ## 🔍 Understanding the Output
 

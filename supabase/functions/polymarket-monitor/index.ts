@@ -153,26 +153,28 @@ async function processUser(
       largestWin >= thresholds.minLargestWin &&
       positionValue >= thresholds.minPositionValue
     ) {
-      // Optional duplicate prevention (only when preventDuplicates is true)
-      if (preventDuplicates) {
-        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-        const { data: existingAlerts } = await supabaseClient
-          .from("bet_alerts")
-          .select("id")
-          .eq("trader_address", address)
-          .gte("created_at", fiveMinutesAgo)
-          .limit(1);
+      // Always check for exact duplicate alerts (same trader + market + bet value)
+      // This prevents showing the same bet multiple times even if API returns it repeatedly
+      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const marketSlug = trade.eventSlug || trade.slug || trade.market_slug;
 
-        if (existingAlerts && existingAlerts.length > 0) {
-          console.log(`⏭️  Skipping - alert already exists for ${address.substring(0, 10)}... in last 5 minutes`);
-          return null;
-        }
+      const { data: existingAlerts } = await supabaseClient
+        .from("bet_alerts")
+        .select("id")
+        .eq("trader_address", address)
+        .eq("market_slug", marketSlug || null)
+        .eq("bet_value", betValue)
+        .gte("created_at", oneHourAgo)
+        .limit(1);
+
+      if (existingAlerts && existingAlerts.length > 0) {
+        console.log(`⏭️  Skipping - identical alert already exists for ${address.substring(0, 10)}...`);
+        return null;
       }
 
       // Construct URLs
       const profileUrl = `https://polymarket.com/profile/${address}`;
       let marketUrl = null;
-      const marketSlug = trade.eventSlug || trade.slug || trade.market_slug;
 
       if (marketSlug && marketSlug !== "unknown") {
         marketUrl = `https://polymarket.com/event/${marketSlug}`;
@@ -254,7 +256,7 @@ serve(async (req) => {
 
     const alerts = [];
     let tradesProcessed = 0;
-    let tradesSkipped = 0;
+    const seenTradesInBatch = new Set<string>();
 
     // Process each trade (similar to polymarketv1 logic)
     for (const trade of recentTrades) {
@@ -271,31 +273,17 @@ serve(async (req) => {
 
       // Create unique trade ID using transactionHash (unique per blockchain transaction)
       // Polymarket API returns transactionHash which is unique for each trade
-      // Fallback to combination of address, asset, timestamp, and size for uniqueness
       const transactionHash = (trade as any).transactionHash ||
                               (trade as any).transaction_hash ||
-                              trade.id ||
-                              `${address}-${(trade as any).asset || (trade as any).asset_id || 'unknown'}-${trade.timestamp || trade.created_at}-${betSize}-${betPrice}`;
+                              `${address}-${(trade as any).asset || (trade as any).asset_id || 'unknown'}-${trade.timestamp || trade.created_at}-${betSize}`;
 
-      // Check if this transaction was already processed (in database - persists across function calls)
-      const { data: existingTrade } = await supabaseClient
-        .from("processed_trades")
-        .select("id")
-        .eq("transaction_hash", transactionHash)
-        .limit(1)
-        .maybeSingle();
-
-      if (existingTrade) {
-        tradesSkipped++;
+      // Skip duplicates within THIS batch only (not across function calls)
+      // This prevents processing the same trade twice in one API response
+      if (seenTradesInBatch.has(transactionHash)) {
         continue;
       }
 
-      // Mark this transaction as processed in database
-      await supabaseClient.from("processed_trades").insert({
-        transaction_hash: transactionHash,
-        trader_address: address,
-      });
-
+      seenTradesInBatch.add(transactionHash);
       tradesProcessed++;
 
       // Skip if bet value is less than minimum threshold
@@ -313,21 +301,12 @@ serve(async (req) => {
       await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_MS));
     }
 
-    // Clean up old processed trades from database (older than 7 days)
-    // This runs asynchronously and doesn't block the response
-    supabaseClient.rpc('cleanup_old_processed_trades').then(() => {
-      console.log('Cleaned up old processed trades');
-    }).catch((err: any) => {
-      console.log('Cleanup skipped:', err.message);
-    });
-
-    console.log(`=== Monitor Complete: ${alerts.length} alerts created, ${tradesProcessed} new trades, ${tradesSkipped} skipped ===`);
+    console.log(`=== Monitor Complete: ${alerts.length} alerts created from ${tradesProcessed} trades ===`);
 
     return new Response(
       JSON.stringify({
         success: true,
         tradesProcessed,
-        tradesSkipped,
         totalTradesFetched: recentTrades.length,
         alertsCreated: alerts.length,
         alerts,

@@ -19,12 +19,13 @@ ON public.processed_trades
 FOR ALL
 USING (true);
 
--- Auto-cleanup old processed trades (keep last 7 days)
+-- Auto-cleanup old processed trades (keep last 1 hour only)
+-- This ensures we don't skip trades that reappear in the API after falling out of the last 100
 CREATE OR REPLACE FUNCTION public.cleanup_old_processed_trades()
 RETURNS void AS $$
 BEGIN
   DELETE FROM public.processed_trades
-  WHERE processed_at < NOW() - INTERVAL '7 days';
+  WHERE processed_at < NOW() - INTERVAL '1 hour';
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
 
