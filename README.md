@@ -1,10 +1,12 @@
 # Poly Whales Tracker 🐋
 
-A production-ready real-time monitoring dashboard for tracking high-performance whale traders on Polymarket with complete market context.
+A production-ready real-time monitoring dashboard for tracking high-performance whale traders on Polymarket with complete market context and continuous monitoring.
 
 ## ✨ Features
 
 - **Real-time Whale Alerts**: Instant notifications when elite whale traders place bets
+- **Continuous Monitoring**: Automated monitoring system that runs 24/7 like polymarketv1
+- **Smart Duplicate Prevention**: Prevents exact duplicate trades while allowing multiple bets from same trader
 - **Market Context**: See full market titles and outcomes for each bet
 - **Historical Performance**: Comprehensive trader stats including PNL, position value, and trade history
 - **Latest Bets Tracking**: Detailed view of the most recent bets with size, price, and value
@@ -14,23 +16,164 @@ A production-ready real-time monitoring dashboard for tracking high-performance 
 
 ## 🚀 Tech Stack
 
-- React 18 + TypeScript + Vite 5
-- Tailwind CSS 3 + shadcn/ui components
-- Supabase (PostgreSQL + Real-time + Edge Functions)
-- TanStack Query (React Query)
+- **Frontend**: React 18 + TypeScript + Vite 5
+- **UI**: Tailwind CSS 3 + shadcn/ui components
+- **Backend**: Supabase (PostgreSQL + Real-time + Edge Functions)
+- **Data Fetching**: TanStack Query (React Query)
+- **Monitoring**: Continuous polling with VPS script
 
 ## 📦 Quick Start
 
+### 1. Install Dependencies
+
 ```bash
 npm install
+```
+
+### 2. Start Development Server
+
+```bash
 npm run dev
 ```
 
 Visit `http://localhost:5173`
 
-## 🏭 Deployment
+### 3. Deploy Edge Function
 
-See [DEPLOYMENT_GUIDE.md](./DEPLOYMENT_GUIDE.md) for detailed instructions.
+```bash
+supabase functions deploy polymarket-monitor
+```
+
+### 4. Start Continuous Monitoring
+
+#### Option A: Using VPS (Recommended for Production)
+
+```bash
+# Make the script executable
+chmod +x vps-monitor.sh
+
+# Start in a screen session
+screen -S polymarket
+./vps-monitor.sh
+
+# Detach: Ctrl+A then D
+# Reattach: screen -r polymarket
+```
+
+#### Option B: Manual Testing
+
+```bash
+curl -X POST https://ikogbedmigsgcgheusrd.supabase.co/functions/v1/polymarket-monitor \
+  -H "Content-Type: application/json" \
+  -d '{"preventDuplicates": false, "processAllTrades": true}'
+```
+
+## 🎛️ Configuration
+
+### Monitoring Behavior
+
+The system tracks each unique trade using the blockchain transaction hash:
+
+✅ **Allowed**: Same trader placing multiple bets (different transactions)
+✅ **Allowed**: All legitimate trades are tracked
+❌ **Prevented**: Processing the same blockchain transaction twice
+
+**How it works:**
+- Each trade has a unique `transactionHash` from the blockchain
+- We track processed transaction hashes to prevent duplicates
+- Same trader can place multiple bets and all will be tracked
+- Only prevents reprocessing the exact same blockchain transaction
+
+### Monitoring Modes
+
+Edit `vps-monitor.sh` line 71 to change mode:
+
+**Mode 1: Continuous (Default)**
+```json
+{"preventDuplicates": false, "processAllTrades": true}
+```
+- Alerts on every qualifying bet
+- Prevents only exact duplicates
+- Best for production
+
+**Mode 2: Deduplicated**
+```json
+{"preventDuplicates": true, "processAllTrades": true}
+```
+- One alert per trader per 5 minutes
+- Reduces notification noise
+- Best for testing
+
+### Custom Thresholds
+
+```json
+{
+  "thresholds": {
+    "minTrades": 100,
+    "minRealizedPnl": 10000,
+    "minLargestWin": 1000,
+    "minPositionValue": 10000,
+    "minBetValue": 500
+  }
+}
+```
+
+## 📊 How It Works
+
+1. **VPS Script** calls edge function every 10 seconds
+2. **Edge Function**:
+   - Fetches last 100 trades from Polymarket API
+   - Uses blockchain `transactionHash` to identify unique trades
+   - Skips already-processed transactions
+   - Checks trader stats against thresholds
+   - Creates alerts in database for qualifying trades
+3. **Frontend** receives real-time updates via Supabase subscriptions
+4. **Users** can filter and view alerts with custom thresholds
+
+**Key Insight:** Each blockchain transaction has a unique hash. By tracking transaction hashes instead of bet amounts/prices, we ensure every legitimate trade is captured while preventing duplicate processing of the same transaction.
+
+## 🔍 Understanding the Output
+
+### VPS Monitor Output
+
+```
+[2025-01-26 10:30:45] ✅ Processed 45/100 trades → 3 NEW ALERTS!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🚨 HIGH-PERFORMANCE BETTOR DETECTED!
+
+👤 Address: 0x1234567890abcdef...
+🔗 Profile: https://polymarket.com/profile/0x1234567890abcdef...
+
+📊 Trader Historical Stats:
+   • Total Trades: 250
+   • Realized PNL: $15,000 USD
+   • Position Value: $12,000 USD
+   • Largest Win: $3,500 USD
+
+💰 Latest Bet Value: $750 USD
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+
+## 🆘 Troubleshooting
+
+### No Alerts Appearing
+
+1. Check if monitoring is running: `screen -ls`
+2. Lower thresholds in the edge function call
+3. Check edge function logs: `supabase functions logs polymarket-monitor`
+
+### Too Many Alerts
+
+1. Enable duplicate prevention: `"preventDuplicates": true`
+2. Increase thresholds
+3. Increase check interval in `vps-monitor.sh`
+
+### Website Not Showing Alerts
+
+1. Check database: Alerts should be in `bet_alerts` table
+2. Check frontend filters
+3. Check browser console for errors
 
 ## 👥 Authors
 

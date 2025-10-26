@@ -65,9 +65,11 @@ check_dependencies() {
 }
 
 trigger_monitor() {
+    # Send request with preventDuplicates=false to match polymarketv1 behavior
+    # This will alert on EVERY qualifying bet, not just once per trader
     local response=$(curl -s -w "\n%{http_code}" -X POST "$SUPABASE_FUNCTION_URL" \
         -H "Content-Type: application/json" \
-        -d '{}' 2>&1)
+        -d '{"preventDuplicates": false, "processAllTrades": true}' 2>&1)
 
     local http_code=$(echo "$response" | tail -n1)
     local body=$(echo "$response" | sed '$d')
@@ -75,14 +77,16 @@ trigger_monitor() {
     if [ "$http_code" = "200" ]; then
         if command -v jq &> /dev/null; then
             local trades=$(echo "$body" | jq -r '.tradesProcessed // 0')
-            local addresses=$(echo "$body" | jq -r '.uniqueAddresses // 0')
+            local total_fetched=$(echo "$body" | jq -r '.totalTradesFetched // 0')
             local alerts=$(echo "$body" | jq -r '.alertsCreated // 0')
 
             if [ "$alerts" -gt 0 ]; then
-                log_success "Processed $trades trades, $addresses traders → $alerts NEW ALERTS!"
-                echo "$body" | jq -r '.alerts[]? | "  → \(.address) | Trades: \(.totalTrades) | PNL: $\(.realizedPnl) | Bet: $\(.betValue)"'
+                log_success "Processed $trades/$total_fetched trades → $alerts NEW ALERTS!"
+                echo ""
+                echo "$body" | jq -r '.alerts[]? | "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n🚨 HIGH-PERFORMANCE BETTOR DETECTED!\n\n👤 Address: \(.address)\n🔗 Profile: https://polymarket.com/profile/\(.address)\n\n📊 Trader Historical Stats:\n   • Total Trades: \(.totalTrades)\n   • Realized PNL: $\(.realizedPnl | tonumber | floor) USD\n   • Position Value: $\(.positionValue | tonumber | floor) USD\n   • Largest Win: $\(.largestWin | tonumber | floor) USD\n\n💰 Latest Bet Value: $\(.betValue | tonumber | floor) USD\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"'
+                echo ""
             else
-                log "Processed $trades trades, $addresses traders, no new alerts"
+                log "Processed $trades/$total_fetched trades, no new alerts"
             fi
         else
             if echo "$body" | grep -q '"alertsCreated":[1-9]'; then
@@ -116,6 +120,11 @@ show_banner() {
     echo "  • Supabase URL: $SUPABASE_PROJECT_URL"
     echo "  • Check Interval: ${CHECK_INTERVAL}s"
     echo "  • Log File: $LOG_FILE"
+    echo "  • Duplicate Prevention: DISABLED (alerts on every bet)"
+    echo "  • Mode: Continuous monitoring (like polymarketv1)"
+    echo ""
+    echo "🔔 Alert Mode: Every qualifying bet (no duplicate prevention)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 }
 

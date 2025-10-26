@@ -21,8 +21,13 @@ const DEFAULT_THRESHOLDS = {
   minBetValue: 500,
 };
 
+// Track processed trades to avoid duplicates within the same monitoring session
+const processedTradeIds = new Set<string>();
+
 interface Trade {
-  id: string;
+  id?: string;
+  transactionHash?: string;
+  transaction_hash?: string;
   proxyWallet?: string;
   maker_address?: string;
   taker_address?: string;
@@ -113,11 +118,11 @@ function extractUserAddress(trade: Trade): string | null {
 async function processUser(
   trade: Trade,
   supabaseClient: any,
-  thresholds = DEFAULT_THRESHOLDS
+  thresholds = DEFAULT_THRESHOLDS,
+  preventDuplicates = false
 ) {
   const address = extractUserAddress(trade);
   if (!address) {
-    console.log("No address found in trade");
     return null;
   }
 
@@ -128,14 +133,11 @@ async function processUser(
 
   // Skip if bet value is too small
   if (betValue < thresholds.minBetValue) {
-    console.log(`Bet value $${betValue} below threshold $${thresholds.minBetValue}`);
     return null;
   }
 
-  console.log(`Processing user ${address.substring(0, 10)}... with bet value $${betValue}`);
-
   try {
-    // Fetch user stats
+    // Fetch user stats (silent processing like polymarketv1)
     const [leaderboardStats, positionValue, profileStats] = await Promise.all([
       getLeaderboardStats(address),
       getPositionValue(address),
@@ -147,8 +149,6 @@ async function processUser(
     const realizedPnl = parseFloat(leaderboardStats?.pnl || 0);
     const largestWin = parseFloat(profileStats.largestWin || 0);
 
-    console.log(`User stats: trades=${totalTrades}, pnl=${realizedPnl}, largestWin=${largestWin}, positionValue=${positionValue}`);
-
     // Check if meets thresholds
     if (
       totalTrades >= thresholds.minTrades &&
@@ -156,23 +156,21 @@ async function processUser(
       largestWin >= thresholds.minLargestWin &&
       positionValue >= thresholds.minPositionValue
     ) {
-      console.log(`✅ User meets thresholds! Checking for duplicates...`);
+      // Optional duplicate prevention (only when preventDuplicates is true)
+      if (preventDuplicates) {
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
+        const { data: existingAlerts } = await supabaseClient
+          .from("bet_alerts")
+          .select("id")
+          .eq("trader_address", address)
+          .gte("created_at", fiveMinutesAgo)
+          .limit(1);
 
-      // Check if we already have a recent alert for this trader (within last 5 minutes)
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
-      const { data: existingAlerts } = await supabaseClient
-        .from("bet_alerts")
-        .select("id")
-        .eq("trader_address", address)
-        .gte("created_at", fiveMinutesAgo)
-        .limit(1);
-
-      if (existingAlerts && existingAlerts.length > 0) {
-        console.log(`⏭️  Skipping - alert already exists for this trader in last 5 minutes`);
-        return null;
+        if (existingAlerts && existingAlerts.length > 0) {
+          console.log(`⏭️  Skipping - alert already exists for ${address.substring(0, 10)}... in last 5 minutes`);
+          return null;
+        }
       }
-
-      console.log(`Creating new alert...`);
 
       // Construct URLs
       const profileUrl = `https://polymarket.com/profile/${address}`;
@@ -212,14 +210,18 @@ async function processUser(
         return null;
       }
 
-      console.log("✅ Alert created successfully!");
+      console.log(`✅ Alert created for ${address.substring(0, 10)}... - $${betValue.toLocaleString()} bet`);
       return { address, totalTrades, realizedPnl, largestWin, positionValue, betValue };
-    } else {
-      console.log("❌ User does not meet thresholds");
-      return null;
     }
+
+    return null;
   } catch (error) {
-    console.error(`Error processing user ${address}:`, error);
+    // Silent error handling like polymarketv1
+    if (error instanceof Error && (error.message.includes('rate limit') || error.message.includes('timeout'))) {
+      // Ignore transient errors
+    } else {
+      console.error(`⚠️  Error processing user ${address.substring(0, 10)}...:`, error);
+    }
     return null;
   }
 }
@@ -238,46 +240,88 @@ serve(async (req) => {
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? ""
     );
 
-    // Get custom thresholds from request or use defaults
-    const { thresholds = DEFAULT_THRESHOLDS } = await req.json().catch(() => ({}));
+    // Get custom thresholds and options from request or use defaults
+    const {
+      thresholds = DEFAULT_THRESHOLDS,
+      preventDuplicates = false,
+      processAllTrades = true
+    } = await req.json().catch(() => ({}));
+
     console.log("Using thresholds:", thresholds);
+    console.log("Duplicate prevention:", preventDuplicates ? "enabled (5 min)" : "disabled");
+    console.log("Process all trades:", processAllTrades);
 
     // Fetch recent trades
     const recentTrades = await getRecentTrades(100);
     console.log(`Found ${recentTrades.length} recent trades`);
 
-    const processedAddresses = new Set<string>();
     const alerts = [];
+    let tradesProcessed = 0;
 
-    // Process each trade
+    // Process each trade (similar to polymarketv1 logic)
     for (const trade of recentTrades) {
       const address = extractUserAddress(trade);
 
-      // Skip if already processed this address in this run
-      if (!address || processedAddresses.has(address)) {
+      if (!address) {
         continue;
       }
 
-      processedAddresses.add(address);
+      // Calculate bet value first
+      const betSize = parseFloat(trade.size?.toString() || trade.amount?.toString() || "0");
+      const betPrice = parseFloat(trade.price?.toString() || "0");
+      const betValue = betSize * betPrice;
 
-      const result = await processUser(trade, supabaseClient, thresholds);
+      // Create unique trade ID using transactionHash (unique per blockchain transaction)
+      // Polymarket API returns transactionHash which is unique for each trade
+      // Fallback to combination of address, asset, timestamp, and size for uniqueness
+      const tradeId = (trade as any).transactionHash ||
+                      (trade as any).transaction_hash ||
+                      trade.id ||
+                      `${address}-${(trade as any).asset || (trade as any).asset_id || 'unknown'}-${trade.timestamp || trade.created_at}-${betSize}-${betPrice}`;
+
+      // Skip if this specific trade was already processed
+      if (processedTradeIds.has(tradeId)) {
+        continue;
+      }
+
+      processedTradeIds.add(tradeId);
+      tradesProcessed++;
+
+      // Skip if bet value is less than minimum threshold
+      if (betValue < thresholds.minBetValue) {
+        continue;
+      }
+
+      // Process user (with optional duplicate prevention)
+      const result = await processUser(trade, supabaseClient, thresholds, preventDuplicates);
       if (result) {
         alerts.push(result);
       }
 
-      // Add small delay between processing users
+      // Add small delay between processing users to respect rate limits
       await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_MS));
     }
 
-    console.log(`=== Monitor Complete: ${alerts.length} alerts created ===`);
+    // Clean up old processed trade IDs to prevent memory issues (keep last 1000)
+    if (processedTradeIds.size > 1000) {
+      const idsArray = Array.from(processedTradeIds);
+      processedTradeIds.clear();
+      idsArray.slice(-500).forEach(id => processedTradeIds.add(id));
+    }
+
+    console.log(`=== Monitor Complete: ${alerts.length} alerts created from ${tradesProcessed} trades ===`);
 
     return new Response(
       JSON.stringify({
         success: true,
-        tradesProcessed: recentTrades.length,
-        uniqueAddresses: processedAddresses.size,
+        tradesProcessed,
+        totalTradesFetched: recentTrades.length,
         alertsCreated: alerts.length,
         alerts,
+        config: {
+          preventDuplicates,
+          thresholds
+        }
       }),
       {
         headers: { ...corsHeaders, "Content-Type": "application/json" },
