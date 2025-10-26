@@ -21,9 +21,6 @@ const DEFAULT_THRESHOLDS = {
   minBetValue: 500,
 };
 
-// Track processed trades to avoid duplicates within the same monitoring session
-const processedTradeIds = new Set<string>();
-
 interface Trade {
   id?: string;
   transactionHash?: string;
@@ -257,6 +254,7 @@ serve(async (req) => {
 
     const alerts = [];
     let tradesProcessed = 0;
+    let tradesSkipped = 0;
 
     // Process each trade (similar to polymarketv1 logic)
     for (const trade of recentTrades) {
@@ -274,17 +272,30 @@ serve(async (req) => {
       // Create unique trade ID using transactionHash (unique per blockchain transaction)
       // Polymarket API returns transactionHash which is unique for each trade
       // Fallback to combination of address, asset, timestamp, and size for uniqueness
-      const tradeId = (trade as any).transactionHash ||
-                      (trade as any).transaction_hash ||
-                      trade.id ||
-                      `${address}-${(trade as any).asset || (trade as any).asset_id || 'unknown'}-${trade.timestamp || trade.created_at}-${betSize}-${betPrice}`;
+      const transactionHash = (trade as any).transactionHash ||
+                              (trade as any).transaction_hash ||
+                              trade.id ||
+                              `${address}-${(trade as any).asset || (trade as any).asset_id || 'unknown'}-${trade.timestamp || trade.created_at}-${betSize}-${betPrice}`;
 
-      // Skip if this specific trade was already processed
-      if (processedTradeIds.has(tradeId)) {
+      // Check if this transaction was already processed (in database - persists across function calls)
+      const { data: existingTrade } = await supabaseClient
+        .from("processed_trades")
+        .select("id")
+        .eq("transaction_hash", transactionHash)
+        .limit(1)
+        .maybeSingle();
+
+      if (existingTrade) {
+        tradesSkipped++;
         continue;
       }
 
-      processedTradeIds.add(tradeId);
+      // Mark this transaction as processed in database
+      await supabaseClient.from("processed_trades").insert({
+        transaction_hash: transactionHash,
+        trader_address: address,
+      });
+
       tradesProcessed++;
 
       // Skip if bet value is less than minimum threshold
@@ -302,19 +313,21 @@ serve(async (req) => {
       await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_MS));
     }
 
-    // Clean up old processed trade IDs to prevent memory issues (keep last 1000)
-    if (processedTradeIds.size > 1000) {
-      const idsArray = Array.from(processedTradeIds);
-      processedTradeIds.clear();
-      idsArray.slice(-500).forEach(id => processedTradeIds.add(id));
-    }
+    // Clean up old processed trades from database (older than 7 days)
+    // This runs asynchronously and doesn't block the response
+    supabaseClient.rpc('cleanup_old_processed_trades').then(() => {
+      console.log('Cleaned up old processed trades');
+    }).catch((err: any) => {
+      console.log('Cleanup skipped:', err.message);
+    });
 
-    console.log(`=== Monitor Complete: ${alerts.length} alerts created from ${tradesProcessed} trades ===`);
+    console.log(`=== Monitor Complete: ${alerts.length} alerts created, ${tradesProcessed} new trades, ${tradesSkipped} skipped ===`);
 
     return new Response(
       JSON.stringify({
         success: true,
         tradesProcessed,
+        tradesSkipped,
         totalTradesFetched: recentTrades.length,
         alertsCreated: alerts.length,
         alerts,

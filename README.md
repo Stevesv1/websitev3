@@ -72,17 +72,19 @@ curl -X POST https://ikogbedmigsgcgheusrd.supabase.co/functions/v1/polymarket-mo
 
 ### Monitoring Behavior
 
-The system tracks each unique trade using the blockchain transaction hash:
+The system tracks each unique trade using blockchain transaction hashes stored in the database:
 
 ✅ **Allowed**: Same trader placing multiple bets (different transactions)
 ✅ **Allowed**: All legitimate trades are tracked
-❌ **Prevented**: Processing the same blockchain transaction twice
+❌ **Prevented**: Processing the same blockchain transaction twice (persists across function calls)
 
 **How it works:**
 - Each trade has a unique `transactionHash` from the blockchain
-- We track processed transaction hashes to prevent duplicates
+- Transaction hashes are stored in `processed_trades` table in Supabase
+- This persists across edge function calls (unlike in-memory storage)
 - Same trader can place multiple bets and all will be tracked
 - Only prevents reprocessing the exact same blockchain transaction
+- Old processed trades (>7 days) are automatically cleaned up
 
 ### Monitoring Modes
 
@@ -124,13 +126,18 @@ Edit `vps-monitor.sh` line 71 to change mode:
 2. **Edge Function**:
    - Fetches last 100 trades from Polymarket API
    - Uses blockchain `transactionHash` to identify unique trades
-   - Skips already-processed transactions
+   - Checks `processed_trades` table to skip already-processed transactions
+   - Stores new transaction hashes in database
    - Checks trader stats against thresholds
    - Creates alerts in database for qualifying trades
 3. **Frontend** receives real-time updates via Supabase subscriptions
 4. **Users** can filter and view alerts with custom thresholds
 
-**Key Insight:** Each blockchain transaction has a unique hash. By tracking transaction hashes instead of bet amounts/prices, we ensure every legitimate trade is captured while preventing duplicate processing of the same transaction.
+**Key Insight:** Each blockchain transaction has a unique hash. By storing processed transaction hashes in the database (not just in memory), we ensure:
+- Every legitimate trade is captured
+- No duplicate alerts even across multiple edge function calls
+- Persistence across server restarts
+- Automatic cleanup of old data (>7 days)
 
 ## 🔍 Understanding the Output
 
