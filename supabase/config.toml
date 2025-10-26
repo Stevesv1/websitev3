@@ -1,0 +1,4 @@
+project_id = "ikogbedmigsgcgheusrd"
+
+[functions.polymarket-monitor]
+verify_jwt = false
