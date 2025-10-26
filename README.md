@@ -72,18 +72,18 @@ curl -X POST https://ikogbedmigsgcgheusrd.supabase.co/functions/v1/polymarket-mo
 
 ### Monitoring Behavior
 
-The system processes ALL trades from the Polymarket API and prevents duplicate ALERTS:
+The system uses a **database unique constraint** to prevent duplicate alerts:
 
 ✅ **Allowed**: Same trader placing multiple bets → Multiple alerts
-✅ **Allowed**: All legitimate trades are processed every time
-❌ **Prevented**: Duplicate alerts (same trader + same market + same bet value within 1 hour)
+✅ **Allowed**: Same trader, same market, different bet size → Multiple alerts
+❌ **Prevented**: Exact duplicate bets (same trader + market + size + price)
 
 **How it works:**
 - Fetches last 100 trades from Polymarket API every 10 seconds
 - Processes ALL trades in each batch (no trade-level deduplication)
-- Before creating an alert, checks if identical alert exists (same trader, market, bet value)
-- Only prevents duplicate ALERTS, not duplicate trade processing
-- This matches polymarketv1 behavior: process everything, show unique alerts
+- Database has unique index on: `(trader_address, market_slug, bet_size, bet_price)`
+- If duplicate bet is inserted, database rejects it automatically
+- This is the most reliable way to prevent duplicates - enforced at database level
 
 ### Monitoring Modes
 
@@ -126,16 +126,17 @@ Edit `vps-monitor.sh` line 71 to change mode:
    - Fetches last 100 trades from Polymarket API
    - Processes ALL trades (no trade-level deduplication)
    - For each trade, checks trader stats against thresholds
-   - Before creating alert, checks if identical alert exists in last hour
-   - Creates alert only if trader qualifies AND no duplicate alert exists
+   - Attempts to insert alert into database
+   - Database unique constraint prevents duplicate bets automatically
 3. **Frontend** receives real-time updates via Supabase subscriptions
 4. **Users** can filter and view alerts with custom thresholds
 
-**Key Insight:** We process every trade in every API call (like polymarketv1), but prevent duplicate ALERTS at the database level. This ensures:
-- Every qualifying trade is evaluated
-- No missed opportunities due to overly aggressive deduplication
-- No duplicate alerts shown to users
-- Same trader can have multiple alerts for different bets
+**Key Insight:** Database-enforced uniqueness is the most reliable solution:
+- Unique index on `(trader_address, market_slug, bet_size, bet_price)`
+- Database automatically rejects duplicate inserts (no manual checking needed)
+- Works even if multiple edge function instances run simultaneously
+- Guarantees no duplicates at the data layer
+- Same trader can have multiple alerts for different bet sizes/prices
 
 ## 🔍 Understanding the Output
 

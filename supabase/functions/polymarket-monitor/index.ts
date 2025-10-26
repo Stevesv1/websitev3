@@ -153,28 +153,10 @@ async function processUser(
       largestWin >= thresholds.minLargestWin &&
       positionValue >= thresholds.minPositionValue
     ) {
-      // Always check for exact duplicate alerts (same trader + market + bet value)
-      // This prevents showing the same bet multiple times even if API returns it repeatedly
-      const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
-      const marketSlug = trade.eventSlug || trade.slug || trade.market_slug;
-
-      const { data: existingAlerts } = await supabaseClient
-        .from("bet_alerts")
-        .select("id")
-        .eq("trader_address", address)
-        .eq("market_slug", marketSlug || null)
-        .eq("bet_value", betValue)
-        .gte("created_at", oneHourAgo)
-        .limit(1);
-
-      if (existingAlerts && existingAlerts.length > 0) {
-        console.log(`⏭️  Skipping - identical alert already exists for ${address.substring(0, 10)}...`);
-        return null;
-      }
-
       // Construct URLs
       const profileUrl = `https://polymarket.com/profile/${address}`;
       let marketUrl = null;
+      const marketSlug = trade.eventSlug || trade.slug || trade.market_slug;
 
       if (marketSlug && marketSlug !== "unknown") {
         marketUrl = `https://polymarket.com/event/${marketSlug}`;
@@ -186,7 +168,7 @@ async function processUser(
       const marketTitle = trade.title || null;
       const outcome = trade.outcome || null;
 
-      // Insert alert
+      // Insert alert - database unique constraint prevents duplicates
       const { error } = await supabaseClient.from("bet_alerts").insert({
         trader_address: address,
         total_trades: totalTrades,
@@ -205,6 +187,11 @@ async function processUser(
       });
 
       if (error) {
+        // Check if it's a duplicate constraint violation (code 23505)
+        if (error.code === '23505' || error.message?.includes('duplicate') || error.message?.includes('unique')) {
+          console.log(`⏭️  Skipping - duplicate alert for ${address.substring(0, 10)}... (same bet already exists)`);
+          return null;
+        }
         console.error("Error inserting alert:", error);
         return null;
       }
